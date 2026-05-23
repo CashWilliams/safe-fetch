@@ -4,11 +4,12 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+import asyncio
 from inspect import isawaitable
 from typing import Any
 
-from ._exceptions import InjectionDetectedError, Policy
-from ._types import InjectionFinding
+from ._exceptions import ClassifierError, InjectionDetectedError, Policy
+from ._types import InjectionFinding, SafeFetchConfig, SafetyEvent
 
 log = logging.getLogger(__name__)
 
@@ -100,6 +101,26 @@ _INJECTION_PATTERNS: list[tuple[str, re.Pattern]] = [
     )),
     ("system_override_claim", re.compile(
         r"\[SYSTEM\s+OVERRIDE"
+    )),
+    ("fake_tool_call", re.compile(
+        r"(<tool_call\b|tool\.call\s*\(|function_call\s*:|call\s+the\s+[A-Za-z0-9_.-]+\s+tool)",
+        re.IGNORECASE,
+    )),
+    ("typoglycemia_ignore_instructions", re.compile(
+        r"\bignroe\s+(previous|prior|all\s+previous)\s+isntructions?\b",
+        re.IGNORECASE,
+    )),
+    ("encoded_ignore_previous", re.compile(
+        r"(aWdub3JlIHByZXZpb3Vz|ignore%20previous%20instructions)",
+        re.IGNORECASE,
+    )),
+    ("instruction_hierarchy", re.compile(
+        r"\b(system|developer|assistant)\s+(message|instructions?)\s+(takes?\s+priority|overrides?)\b",
+        re.IGNORECASE,
+    )),
+    ("exfiltration_phrase", re.compile(
+        r"\b(exfiltrate|send|post|upload)\b.{0,40}\b(secret|token|api[_ -]?key|system prompt|credentials?)\b",
+        re.IGNORECASE,
     )),
 ]
 
@@ -238,19 +259,53 @@ def _heuristic_scan(text: str) -> list[InjectionFinding]:
 
 async def _escalate_with_llm(finding: InjectionFinding, text: str, llm_client: Any) -> InjectionFinding:
     """Call llm_client.classify_injection(text) and upgrade finding if adversarial."""
-    try:
-        result = llm_client.classify_injection(text)
-        is_adversarial = await result if isawaitable(result) else result
-        if is_adversarial:
-            return InjectionFinding(
-                confidence="HIGH",
-                pattern_matched=finding.pattern_matched,
-                heuristic=finding.heuristic + "+llm_escalated" if finding.heuristic else "llm_escalated",
-                snippet=finding.snippet,
-            )
-    except Exception as exc:
-        log.warning("LLM escalation call failed: %s", exc)
+    result = llm_client.classify_injection(text)
+    is_adversarial = await result if isawaitable(result) else result
+    if is_adversarial:
+        return InjectionFinding(
+            confidence="HIGH",
+            pattern_matched=finding.pattern_matched,
+            heuristic=finding.heuristic + "+llm_escalated" if finding.heuristic else "llm_escalated",
+            snippet=finding.snippet,
+        )
     return finding
+
+
+async def _escalate_with_policy(
+    finding: InjectionFinding,
+    text: str,
+    llm_client: Any,
+    config: SafeFetchConfig,
+    safety_events: list[SafetyEvent],
+) -> InjectionFinding:
+    try:
+        return await asyncio.wait_for(
+            _escalate_with_llm(finding, text, llm_client),
+            timeout=config.classifier_timeout,
+        )
+    except Exception as exc:
+        safety_events.append(
+            SafetyEvent(
+                category="classifier",
+                action="failure",
+                severity="warning",
+                message=str(exc),
+            )
+        )
+        if config.classifier_failure_policy == Policy.STRICT:
+            raise ClassifierError("Classifier escalation failed") from exc
+        log.warning("LLM escalation call failed: %s", exc)
+        return finding
+
+
+def _redact_document(mode: str, text: str) -> str:
+    if mode == "none":
+        return text
+    if mode == "document":
+        return "[CONTENT REDACTED: potential injection]"
+    if mode == "segment":
+        return _SENTENCE_SPLIT.sub("[CONTENT REDACTED: potential injection] ", text, count=1)
+    return "[CONTENT REDACTED: potential injection]"
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +316,8 @@ async def scan_response(
     content: str,
     policy: Policy,
     llm_client: Any = None,
+    config: SafeFetchConfig | None = None,
+    safety_events: list[SafetyEvent] | None = None,
 ) -> tuple[str, list[InjectionFinding]]:
     """
     Scan response content for injection.
@@ -268,6 +325,11 @@ async def scan_response(
     Returns (cleaned_content, findings).
     Raises InjectionDetectedError under STRICT policy on HIGH findings.
     """
+    if config is None:
+        config = SafeFetchConfig(response_policy=policy, llm_client=llm_client)
+    if safety_events is None:
+        safety_events = []
+
     # Always strip invisible characters first
     cleaned = strip_invisible(content)
 
@@ -291,7 +353,7 @@ async def scan_response(
         and not pattern_findings
     ):
         for f in heuristic_findings:
-            upgraded = await _escalate_with_llm(f, cleaned, llm_client)
+            upgraded = await _escalate_with_policy(f, cleaned, llm_client, config, safety_events)
             upgraded_heuristic.append(upgraded)
     else:
         upgraded_heuristic = heuristic_findings
@@ -311,6 +373,14 @@ async def scan_response(
     if policy == Policy.WARN:
         for f in all_findings:
             log.warning("safe-fetch injection finding: confidence=%s pattern=%s", f.confidence, f.pattern_matched or f.heuristic)
+            safety_events.append(
+                SafetyEvent(
+                    category="response_guard",
+                    action="finding",
+                    severity=f.confidence.lower(),
+                    message=f.pattern_matched or f.heuristic or "injection finding",
+                )
+            )
         if high_findings:
             # Redact matched snippets from prose only — preserve code blocks verbatim.
             # Split cleaned into segments, redact prose segments, reassemble.
@@ -318,7 +388,26 @@ async def scan_response(
                 if f.pattern_matched:
                     for name, pattern in _INJECTION_PATTERNS:
                         if name == f.pattern_matched:
-                            cleaned = _redact_prose_only(cleaned, pattern)
+                            before = cleaned
+                            if config.redaction_mode == "none":
+                                break
+                            if config.redaction_mode in ("pattern", "snippet"):
+                                cleaned = _redact_prose_only(cleaned, pattern)
+                            elif config.redaction_mode == "segment":
+                                cleaned = _redact_document("segment", cleaned)
+                            elif config.redaction_mode == "document":
+                                cleaned = _redact_document("document", cleaned)
+                            if cleaned == before and pattern.search(unicodedata.normalize("NFKC", before)):
+                                cleaned = _redact_document(config.redaction_mode, cleaned)
+                            if cleaned != before:
+                                safety_events.append(
+                                    SafetyEvent(
+                                        category="response_guard",
+                                        action="redaction",
+                                        severity="warning",
+                                        message=f.pattern_matched,
+                                    )
+                                )
                             break
 
     return cleaned, all_findings

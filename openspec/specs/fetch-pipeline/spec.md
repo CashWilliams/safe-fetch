@@ -1,8 +1,6 @@
 ## Purpose
 Define the HTTP fetch, markdown negotiation, extraction fallback, timeout, and redirect behavior used by `safe_fetch()`.
-
 ## Requirements
-
 ### Requirement: Markdown content negotiation
 The fetch pipeline SHALL attempt to retrieve content as markdown by including `Accept: text/markdown, text/plain;q=0.9, text/html;q=0.8` in the request headers. If the server responds with `Content-Type: text/markdown` or `text/plain`, the response body is used directly without HTML extraction.
 
@@ -88,3 +86,32 @@ The fetch pipeline SHALL follow HTTP redirects up to a maximum of 5 hops. Each r
 #### Scenario: Redirect limit exceeded
 - **WHEN** a URL redirects more than 5 times
 - **THEN** `RedirectLimitError` is raised
+
+### Requirement: Rebinding-safe fetch transport
+The fetch pipeline SHALL use network-boundary validation at connection time for primary requests, redirects, and `.md` probes.
+
+#### Scenario: Connect-time private IP is blocked
+- **WHEN** connect-time resolution returns a private IP for an otherwise valid public hostname
+- **THEN** the fetch pipeline raises `SSRFBlockedError`
+
+### Requirement: Resource-limited streaming
+The fetch pipeline SHALL stream response bodies while enforcing `max_response_bytes` and content-type policy before extraction.
+
+#### Scenario: Stream stops at byte limit
+- **WHEN** streamed response bytes exceed the configured maximum
+- **THEN** the client stops reading and raises `ResponseTooLargeError`
+
+### Requirement: Total timeout wraps full fetch
+The fetch pipeline SHALL apply `total_timeout` to the complete fetch operation including redirects, probe, extraction, and response guard work.
+
+#### Scenario: Slow extraction is timed out
+- **WHEN** HTML extraction causes the operation to exceed `total_timeout`
+- **THEN** `FetchTimeoutError` is raised with `phase="total"`
+
+### Requirement: HTTP status and content type enforcement
+The fetch pipeline SHALL reject disallowed HTTP statuses and content types before extraction or response scanning.
+
+#### Scenario: Unsupported content type fails early
+- **WHEN** a response has `Content-Type: image/png`
+- **THEN** `UnsupportedContentTypeError` is raised before body extraction
+

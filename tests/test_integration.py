@@ -78,7 +78,17 @@ class TestSuccessfulPaths:
         assert len(result.raw_content) > 0
 
     async def test_result_fully_populated(self):
-        resp = _response("text/markdown", "# Test\n\nContent here.")
+        resp = httpx.Response(
+            status_code=200,
+            headers={
+                "content-type": "text/markdown",
+                "content-length": "21",
+                "etag": '"abc"',
+                "last-modified": "Sat, 23 May 2026 00:00:00 GMT",
+            },
+            text="# Test\n\nContent here.",
+            request=httpx.Request("GET", "https://example.com/"),
+        )
 
         with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=resp):
             result = await safe_fetch("https://example.com/")
@@ -89,6 +99,19 @@ class TestSuccessfulPaths:
         assert result.extraction_method
         assert isinstance(result.request_findings, list)
         assert isinstance(result.response_findings, list)
+        assert result.metadata.final_url == "https://example.com/"
+        assert result.metadata.redacted_source_url == "https://example.com/"
+        assert result.metadata.source_host == "example.com"
+        assert result.metadata.status_code == 200
+        assert result.metadata.content_type == "text/markdown"
+        assert result.metadata.content_length == 21
+        assert result.metadata.etag == '"abc"'
+        assert result.metadata.last_modified
+        assert result.metadata.fetched_at.endswith("Z")
+        assert result.metadata.elapsed_ms >= 0
+        assert result.integrity.raw_content_sha256
+        assert result.integrity.safe_content_sha256
+        assert result.risk.level in {"low", "medium", "high"}
 
 
 # ---------------------------------------------------------------------------
@@ -162,3 +185,44 @@ class TestErrorPaths:
             )
 
         assert any(f.detector == "email" for f in result.request_findings)
+
+    async def test_boundary_source_url_redacts_query_values(self):
+        resp = _response(
+            "text/markdown",
+            "# Hello\n\nContent.",
+            url="https://example.com/page?token=secret",
+        )
+
+        with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=resp):
+            result = await safe_fetch(
+                "https://example.com/page?token=secret",
+                config=SafeFetchConfig(request_policy=Policy.PERMISSIVE),
+            )
+
+        assert "secret" not in result.content
+        assert "token=" in result.content
+        assert "REDACTED" in result.content
+        assert "secret" not in result.metadata.redacted_source_url
+
+    async def test_redirect_chain_metadata_recorded(self):
+        first = httpx.Response(
+            302,
+            headers={"location": "https://example.com/final"},
+            request=httpx.Request("GET", "https://example.com/start"),
+        )
+        final = _response("text/markdown", "# Final", url="https://example.com/final")
+        responses = [first, final]
+
+        async def mock_get(url, **kwargs):
+            return responses.pop(0)
+
+        with (
+            patch("httpx.AsyncClient.get", new_callable=AsyncMock, side_effect=mock_get),
+            patch("safe_fetch._fetch_pipeline.check_ssrf"),
+        ):
+            result = await safe_fetch("https://example.com/start")
+
+        assert result.metadata.redirect_chain == [
+            {"from": "https://example.com/start", "to": "https://example.com/final"}
+        ]
+        assert "redirects followed" in result.risk.reasons

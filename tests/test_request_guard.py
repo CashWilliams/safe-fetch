@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from safe_fetch._exceptions import (
+    InvalidURLError,
     InvalidSchemeError,
     PIILeakError,
     Policy,
@@ -174,6 +175,73 @@ class TestPolicyWiring:
                     {"Authorization": "Bearer ghp_" + "a" * 36},
                     Policy.STRICT,
                 )
+
+    def test_secret_in_path_detected_and_redacted(self):
+        from unittest.mock import patch
+
+        raw_secret = "ghp_" + "a" * 36
+        with patch("safe_fetch._request_guard.check_ssrf") as check_ssrf_mock:
+            with pytest.raises(SecretLeakError) as exc_info:
+                scan_request(
+                    f"https://example.com/download/{raw_secret}",
+                    {},
+                    Policy.STRICT,
+                )
+
+        finding = exc_info.value.finding
+        assert finding.location.startswith("path:")
+        assert raw_secret not in finding.snippet
+        assert finding.stable_hash
+        check_ssrf_mock.assert_not_called()
+
+    def test_secret_in_query_key_detected(self):
+        from unittest.mock import patch
+
+        raw_secret = "ghp_" + "a" * 36
+        with patch("safe_fetch._request_guard.check_ssrf"):
+            with pytest.raises(SecretLeakError) as exc_info:
+                scan_request(
+                    f"https://example.com/?{raw_secret}=1",
+                    {},
+                    Policy.STRICT,
+                )
+
+        assert exc_info.value.finding.location.startswith("query-key:")
+        assert raw_secret not in exc_info.value.finding.snippet
+
+    def test_pii_in_path_detected_and_redacted(self):
+        from unittest.mock import patch
+
+        with patch("safe_fetch._request_guard.check_ssrf"):
+            with pytest.raises(PIILeakError) as exc_info:
+                scan_request(
+                    "https://example.com/users/user@example.com",
+                    {},
+                    Policy.STRICT,
+                )
+
+        assert "user@example.com" not in exc_info.value.finding.snippet
+        assert exc_info.value.finding.stable_hash
+
+    def test_secret_in_userinfo_blocks_before_invalid_url_reporting(self):
+        raw_secret = "ghp_" + "a" * 36
+        with pytest.raises(SecretLeakError) as exc_info:
+            scan_request(
+                f"https://user:{raw_secret}@example.com/",
+                {},
+                Policy.STRICT,
+            )
+
+        assert raw_secret not in str(exc_info.value)
+        assert raw_secret not in exc_info.value.finding.snippet
+
+    def test_userinfo_without_secret_still_rejected(self):
+        with pytest.raises(InvalidURLError):
+            scan_request(
+                "https://user:password@example.com/",
+                {},
+                Policy.PERMISSIVE,
+            )
 
     def test_strict_secret_blocks_before_ssrf_resolution(self):
         from unittest.mock import patch

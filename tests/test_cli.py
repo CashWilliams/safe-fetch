@@ -11,10 +11,12 @@ import pytest
 
 from safe_fetch._cli import _load_config, main
 from safe_fetch._exceptions import (
+    HTTPStatusError,
     InjectionDetectedError,
     InvalidSchemeError,
     Policy,
     RedirectLimitError,
+    ResponseTooLargeError,
     SSRFBlockedError,
 )
 from safe_fetch._types import InjectionFinding, RequestFinding, SafeFetchConfig, SafeFetchResult
@@ -41,6 +43,10 @@ def test_load_config_defaults(monkeypatch):
     assert cfg.read_timeout == 30.0
     assert cfg.user_agent == "safe-fetch/1.0 (LLM-agent)"
     assert cfg.llm_client is None
+    assert cfg.max_response_bytes == 10_000_000
+    assert cfg.total_timeout == 60.0
+    assert cfg.max_redirects == 5
+    assert cfg.safe_markdown is True
 
 
 def test_load_config_reads_env_vars(monkeypatch):
@@ -49,6 +55,18 @@ def test_load_config_reads_env_vars(monkeypatch):
     monkeypatch.setenv("SAFE_FETCH_CONNECT_TIMEOUT", "5.5")
     monkeypatch.setenv("SAFE_FETCH_READ_TIMEOUT", "60")
     monkeypatch.setenv("SAFE_FETCH_USER_AGENT", "my-agent/2.0")
+    monkeypatch.setenv("SAFE_FETCH_MAX_RESPONSE_BYTES", "1024")
+    monkeypatch.setenv("SAFE_FETCH_TOTAL_TIMEOUT", "9.5")
+    monkeypatch.setenv("SAFE_FETCH_MAX_REDIRECTS", "2")
+    monkeypatch.setenv("SAFE_FETCH_ALLOW_HTTP", "false")
+    monkeypatch.setenv("SAFE_FETCH_ALLOWED_HOSTS", "docs.example.com,api.example.com")
+    monkeypatch.setenv("SAFE_FETCH_BLOCKED_CIDRS", "10.0.0.0/8")
+    monkeypatch.setenv("SAFE_FETCH_ALLOWED_CONTENT_TYPES", "text/plain,text/markdown")
+    monkeypatch.setenv("SAFE_FETCH_HTTP_STATUS_POLICY", "all")
+    monkeypatch.setenv("SAFE_FETCH_REDACTION_MODE", "document")
+    monkeypatch.setenv("SAFE_FETCH_SAFE_MARKDOWN", "false")
+    monkeypatch.setenv("SAFE_FETCH_CLASSIFIER_TIMEOUT", "1.5")
+    monkeypatch.setenv("SAFE_FETCH_CLASSIFIER_FAILURE_POLICY", "strict")
 
     cfg = _load_config()
     assert cfg.request_policy == Policy.PERMISSIVE
@@ -57,6 +75,18 @@ def test_load_config_reads_env_vars(monkeypatch):
     assert cfg.read_timeout == 60.0
     assert cfg.user_agent == "my-agent/2.0"
     assert cfg.llm_client is None
+    assert cfg.max_response_bytes == 1024
+    assert cfg.total_timeout == 9.5
+    assert cfg.max_redirects == 2
+    assert cfg.allow_http is False
+    assert cfg.allowed_hosts == {"docs.example.com", "api.example.com"}
+    assert cfg.blocked_cidrs == {"10.0.0.0/8"}
+    assert cfg.allowed_content_types == {"text/plain", "text/markdown"}
+    assert cfg.http_status_policy == "all"
+    assert cfg.redaction_mode == "document"
+    assert cfg.safe_markdown is False
+    assert cfg.classifier_timeout == 1.5
+    assert cfg.classifier_failure_policy == Policy.STRICT
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +102,20 @@ def test_load_config_invalid_policy_exits_1(monkeypatch):
 
 def test_load_config_invalid_timeout_exits_1(monkeypatch):
     monkeypatch.setenv("SAFE_FETCH_CONNECT_TIMEOUT", "not-a-number")
+    with pytest.raises(SystemExit) as exc_info:
+        _load_config()
+    assert exc_info.value.code == 1
+
+
+def test_load_config_invalid_cidr_exits_1(monkeypatch):
+    monkeypatch.setenv("SAFE_FETCH_BLOCKED_CIDRS", "not-a-cidr")
+    with pytest.raises(SystemExit) as exc_info:
+        _load_config()
+    assert exc_info.value.code == 1
+
+
+def test_load_config_invalid_boolean_exits_1(monkeypatch):
+    monkeypatch.setenv("SAFE_FETCH_SAFE_MARKDOWN", "maybe")
     with pytest.raises(SystemExit) as exc_info:
         _load_config()
     assert exc_info.value.code == 1
@@ -202,6 +246,36 @@ def test_exit_code_redirect_limit(monkeypatch, capsys):
     assert exc_info.value.code == 9
 
 
+def test_exit_code_response_too_large(monkeypatch, capsys):
+    def raise_too_large(coro):
+        coro.close()
+        raise ResponseTooLargeError("too large")
+
+    monkeypatch.setattr("safe_fetch._cli.asyncio.run", raise_too_large)
+    monkeypatch.setattr("sys.argv", ["safe-fetch", "https://example.com/"])
+    monkeypatch.setattr("safe_fetch._cli._load_config", lambda: SafeFetchConfig())
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 12
+
+
+def test_exit_code_http_status(monkeypatch, capsys):
+    def raise_status(coro):
+        coro.close()
+        raise HTTPStatusError("bad status")
+
+    monkeypatch.setattr("safe_fetch._cli.asyncio.run", raise_status)
+    monkeypatch.setattr("sys.argv", ["safe-fetch", "https://example.com/"])
+    monkeypatch.setattr("safe_fetch._cli._load_config", lambda: SafeFetchConfig())
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 14
+
+
 # ---------------------------------------------------------------------------
 # 6.7 Test empty content exits 7
 # ---------------------------------------------------------------------------
@@ -245,7 +319,12 @@ def test_help_exits_0_and_contains_tables():
     assert "SAFE_FETCH_CONNECT_TIMEOUT" in output
     assert "SAFE_FETCH_READ_TIMEOUT" in output
     assert "SAFE_FETCH_USER_AGENT" in output
+    assert "SAFE_FETCH_MAX_RESPONSE_BYTES" in output
+    assert "SAFE_FETCH_BLOCKED_CIDRS" in output
+    assert "SAFE_FETCH_SAFE_MARKDOWN" in output
     # exit code table
     assert "InvalidSchemeError" in output
     assert "SSRFBlockedError" in output
     assert "InjectionDetectedError" in output
+    assert "ResponseTooLargeError" in output
+    assert "HTTPStatusError" in output

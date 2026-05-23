@@ -38,6 +38,14 @@ class InvalidSchemeError(SafeFetchError):
     """Disallowed URL scheme."""
 
 
+class InvalidURLError(SafeFetchError):
+    """Malformed, ambiguous, or unsafe URL."""
+
+
+class HostPolicyError(SafeFetchError):
+    """Host or CIDR policy rejected a target."""
+
+
 class InjectionDetectedError(SafeFetchError):
     """Injection detected in response under STRICT policy."""
 
@@ -69,3 +77,31 @@ class RedirectLimitError(SafeFetchError):
     def __init__(self, message: str, redirects: int = 0) -> None:
         super().__init__(message)
         self.redirects = redirects
+
+
+class ResponseTooLargeError(SafeFetchError):
+    """Response body exceeded the configured byte limit."""
+
+    def __init__(self, message: str, limit: int = 0) -> None:
+        super().__init__(message)
+        self.limit = limit
+
+
+class UnsupportedContentTypeError(SafeFetchError):
+    """Response content type is not allowed."""
+
+    def __init__(self, message: str, content_type: str = "") -> None:
+        super().__init__(message)
+        self.content_type = content_type
+
+
+class HTTPStatusError(SafeFetchError):
+    """HTTP status policy rejected the response."""
+
+    def __init__(self, message: str, status_code: int = 0) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class ClassifierError(SafeFetchError):
+    """Classifier escalation failed under fail-closed policy."""

@@ -1,8 +1,6 @@
 ## Purpose
 Detect and handle prompt-injection content in fetched responses while preserving clean content for callers.
-
 ## Requirements
-
 ### Requirement: Invisible and zero-width character stripping
 The response guard SHALL strip all invisible and zero-width Unicode characters from fetched content before returning it. This includes zero-width space (U+200B), zero-width non-joiner (U+200C), zero-width joiner (U+200D), word joiner (U+2060), soft hyphen (U+00AD), and similar characters that can be used to hide injected content from human review.
 
@@ -99,3 +97,29 @@ The response guard SHALL attach all findings to the `SafeFetchResult` as structu
 #### Scenario: Result includes finding list
 - **WHEN** any findings are produced
 - **THEN** `result.response_findings` is a non-empty list of `InjectionFinding` objects each containing: `confidence` (HIGH/MEDIUM/LOW), `pattern_matched` (str or None), `heuristic` (str or None), `snippet` (up to 100 chars of surrounding context)
+
+### Requirement: Classifier timeout and failure policy
+The response guard SHALL enforce `classifier_timeout` for optional LLM escalation and SHALL apply `classifier_failure_policy` when classification fails or times out.
+
+#### Scenario: Classifier timeout fails closed
+- **WHEN** a classifier call exceeds `classifier_timeout` and classifier failure policy is STRICT
+- **THEN** `ClassifierError` is raised
+
+#### Scenario: Classifier timeout warns
+- **WHEN** a classifier call exceeds `classifier_timeout` and classifier failure policy is WARN
+- **THEN** a safety event is recorded and local heuristic findings are preserved
+
+### Requirement: Expanded prompt-injection pattern coverage
+The response guard SHALL detect direct, indirect, typoglycemia, encoded, fake tool-call, instruction hierarchy, exfiltration, and Markdown/HTML prompt-injection indicators outside excluded code spans.
+
+#### Scenario: Fake tool call is detected
+- **WHEN** fetched prose contains a fake tool invocation instructing the agent to call a privileged tool
+- **THEN** a response finding is produced
+
+### Requirement: Redaction of normalized-only findings
+The response guard SHALL redact or neutralize content that only matched after Unicode normalization according to configured `redaction_mode`.
+
+#### Scenario: Normalized-only match is not returned verbatim in WARN mode
+- **WHEN** NFKC normalization exposes an injection phrase that is not directly present in original text
+- **THEN** safe output redacts or neutralizes the corresponding original content
+

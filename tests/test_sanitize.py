@@ -1,7 +1,7 @@
 """Tests for HTML sanitization before extraction."""
 from __future__ import annotations
 
-from safe_fetch._extractor import extract, sanitize_html
+from safe_fetch._extractor import extract, record_rendered_text_delta, sanitize_html
 
 
 def _wrap(body: str) -> str:
@@ -236,3 +236,95 @@ def test_extract_trixie_style_injection_blocked():
     assert "INJECTION SYSTEM DATA" not in content
     assert "Extinction_Risk" not in content
     assert "Trixie" in content
+
+
+def test_zero_width_and_clip_styles_stripped():
+    html = _wrap(
+        '<p style="width:0;height:0">Zero</p>'
+        '<p style="clip-path: inset(50%)">Clipped</p>'
+        '<p style="color: transparent">Transparent</p>'
+        '<p>Visible</p>'
+    )
+    result = sanitize_html(html)
+    assert "Zero" not in result
+    assert "Clipped" not in result
+    assert "Transparent" not in result
+    assert "Visible" in result
+
+
+def test_offscreen_right_bottom_and_transform_stripped():
+    html = _wrap(
+        '<p style="position:absolute;right:-9999px">Right</p>'
+        '<p style="position:fixed;bottom:-9999px">Bottom</p>'
+        '<p style="transform:scale(0)">Scaled</p>'
+    )
+    result = sanitize_html(html)
+    assert "Right" not in result
+    assert "Bottom" not in result
+    assert "Scaled" not in result
+
+
+def test_stylesheet_hidden_class_and_id_stripped():
+    html = _wrap(
+        "<style>.hidden{display:none}#secret{visibility:hidden}</style>"
+        '<p class="hidden">Class payload</p>'
+        '<p id="secret">ID payload</p>'
+        "<p>Visible</p>"
+    )
+    result = sanitize_html(html)
+    assert "Class payload" not in result
+    assert "ID payload" not in result
+    assert "Visible" in result
+
+
+def test_additional_hidden_elements_stripped():
+    html = _wrap(
+        '<p aria-hidden="true">Aria</p>'
+        "<div inert>Inert</div>"
+        '<input type="hidden" value="secret payload">'
+        "<svg><desc>SVG desc payload</desc><title>SVG title payload</title>"
+        "<foreignObject>SVG object payload</foreignObject></svg>"
+        "<p>Visible</p>"
+    )
+    result = sanitize_html(html)
+    assert "Aria" not in result
+    assert "Inert" not in result
+    assert "secret payload" not in result
+    assert "SVG desc payload" not in result
+    assert "SVG title payload" not in result
+    assert "SVG object payload" not in result
+    assert "Visible" in result
+
+
+def test_sanitizer_records_removal_events():
+    events = []
+    html = _wrap('<p style="display:none">Hidden</p><p>Visible</p>')
+
+    result = sanitize_html(html, safety_events=events)
+
+    assert "Hidden" not in result
+    assert events
+    assert events[0].category == "html_sanitizer"
+    assert events[0].count == 1
+
+
+def test_rendered_text_delta_records_event():
+    events = []
+
+    record_rendered_text_delta(
+        "Visible content HiddenInjection",
+        "Visible content",
+        events,
+    )
+
+    assert events
+    assert events[0].action == "rendered_text_delta"
+
+
+def test_rendered_text_unavailable_records_event():
+    events = []
+
+    record_rendered_text_delta("Visible content", None, events)
+
+    assert events
+    assert events[0].action == "rendered_text_unavailable"

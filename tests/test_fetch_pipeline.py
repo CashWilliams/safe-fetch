@@ -6,8 +6,15 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from safe_fetch._exceptions import FetchTimeoutError, RedirectLimitError, SSRFBlockedError
-from safe_fetch._fetch_pipeline import _build_md_url, fetch
+from safe_fetch._exceptions import (
+    FetchTimeoutError,
+    HTTPStatusError,
+    RedirectLimitError,
+    ResponseTooLargeError,
+    SSRFBlockedError,
+    UnsupportedContentTypeError,
+)
+from safe_fetch._fetch_pipeline import _build_md_url, _extract_with_limit, fetch
 from safe_fetch._types import SafeFetchConfig
 
 
@@ -75,6 +82,81 @@ class TestTimeouts:
             with pytest.raises(FetchTimeoutError) as exc_info:
                 await fetch("https://example.com/", config)
             assert exc_info.value.phase == "read"
+
+    async def test_total_timeout_raises_fetch_timeout_error(self, config):
+        config.total_timeout = 0.01
+
+        async def slow_get(url, **kwargs):
+            await __import__("asyncio").sleep(1)
+            return _make_response("text/plain", "late")
+
+        with patch("httpx.AsyncClient.get", new_callable=AsyncMock, side_effect=slow_get):
+            with pytest.raises(FetchTimeoutError) as exc_info:
+                await fetch("https://example.com/", config)
+            assert exc_info.value.phase == "total"
+
+
+# ---------------------------------------------------------------------------
+# Resource and response policy controls
+# ---------------------------------------------------------------------------
+
+class TestResourceControls:
+    async def test_response_too_large_raises(self, config):
+        config.max_response_bytes = 5
+        response = _make_response("text/plain", "0123456789")
+
+        with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=response):
+            with pytest.raises(ResponseTooLargeError):
+                await fetch("https://example.com/", config)
+
+    async def test_404_rejected_by_default(self, config):
+        response = _make_response("text/plain", "not found", status=404)
+
+        with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=response):
+            with pytest.raises(HTTPStatusError) as exc_info:
+                await fetch("https://example.com/missing", config)
+
+        assert exc_info.value.status_code == 404
+
+    async def test_404_allowed_by_policy(self, config):
+        config.http_status_policy = "2xx,4xx"
+        response = _make_response("text/plain", "not found", status=404)
+
+        with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=response):
+            content, final_url, method, status = await fetch("https://example.com/missing", config)
+
+        assert content == "not found"
+        assert status == 404
+
+    async def test_unsupported_content_type_raises(self, config):
+        response = _make_response("image/png", "png bytes")
+
+        with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=response):
+            with pytest.raises(UnsupportedContentTypeError):
+                await fetch("https://example.com/image.png", config)
+
+    async def test_extraction_worker_limit(self, config):
+        import asyncio
+
+        config.max_extraction_workers = 1
+        running = 0
+        max_running = 0
+
+        def slow_extract(html, *, url, status_code, safety_events=None):
+            nonlocal running, max_running
+            running += 1
+            max_running = max(max_running, running)
+            __import__("time").sleep(0.02)
+            running -= 1
+            return html, "mock"
+
+        with patch("safe_fetch._fetch_pipeline.extract", side_effect=slow_extract):
+            await asyncio.gather(
+                _extract_with_limit("a", url="https://example.com/a", status_code=200, config=config),
+                _extract_with_limit("b", url="https://example.com/b", status_code=200, config=config),
+            )
+
+        assert max_running == 1
 
 
 # ---------------------------------------------------------------------------

@@ -5,33 +5,20 @@ import ipaddress
 import logging
 import re
 import socket
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qsl, urlparse, unquote
 
 from ._exceptions import (
-    InvalidSchemeError,
     PIILeakError,
     Policy,
     SSRFBlockedError,
     SecretLeakError,
 )
 from ._types import RequestFinding
+from ._types import SafeFetchConfig
+from ._redaction import redacted_snippet, stable_hash
+from ._url import canonicalize_url, enforce_ip_policy
 
 log = logging.getLogger(__name__)
-
-_ALLOWED_SCHEMES = {"http", "https"}
-
-# Private / reserved IP networks (RFC 1918, loopback, link-local, metadata)
-_PRIVATE_NETWORKS = [
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),  # link-local / AWS metadata
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("fc00::/7"),
-    ipaddress.ip_network("fe80::/10"),
-    ipaddress.ip_network("100.64.0.0/10"),  # shared address space
-]
 
 # PII regexes
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
@@ -49,7 +36,7 @@ def _is_private_ip(addr: str) -> bool:
         ip = ipaddress.ip_address(addr)
     except ValueError:
         return False
-    return any(ip in net for net in _PRIVATE_NETWORKS)
+    return not ip.is_global
 
 
 def _luhn_valid(number: str) -> bool:
@@ -93,7 +80,8 @@ def _scan_value_for_secrets(value: str, location: str) -> list[RequestFinding]:
                         kind="secret",
                         detector=plugin.__class__.__name__,
                         location=location,
-                        snippet=value[:100],
+                        snippet=redacted_snippet(value),
+                        stable_hash=stable_hash(value),
                     )
                 )
                 break  # one finding per plugin per value is enough
@@ -117,7 +105,8 @@ def _keyword_secret_scan(value: str, location: str) -> list[RequestFinding]:
                     kind="secret",
                     detector="KeywordDetector",
                     location=location,
-                    snippet=value[:100],
+                    snippet=redacted_snippet(value),
+                    stable_hash=stable_hash(value),
                 )
             )
             break
@@ -128,7 +117,8 @@ def _keyword_secret_scan(value: str, location: str) -> list[RequestFinding]:
                 kind="secret",
                 detector="AWSKeyDetector",
                 location=location,
-                snippet=value[:100],
+                snippet=redacted_snippet(value),
+                stable_hash=stable_hash(value),
             )
         )
     # GitHub token
@@ -138,7 +128,8 @@ def _keyword_secret_scan(value: str, location: str) -> list[RequestFinding]:
                 kind="secret",
                 detector="GitHubTokenDetector",
                 location=location,
-                snippet=value[:100],
+                snippet=redacted_snippet(value),
+                stable_hash=stable_hash(value),
             )
         )
     return findings
@@ -147,50 +138,53 @@ def _keyword_secret_scan(value: str, location: str) -> list[RequestFinding]:
 def _scan_value_for_pii(value: str, location: str) -> list[RequestFinding]:
     findings: list[RequestFinding] = []
     if _EMAIL_RE.search(value):
-        findings.append(RequestFinding(kind="pii", detector="email", location=location, snippet=value[:100]))
+        findings.append(RequestFinding(kind="pii", detector="email", location=location, snippet=redacted_snippet(value), stable_hash=stable_hash(value)))
     if _SSN_RE.search(value):
-        findings.append(RequestFinding(kind="pii", detector="ssn", location=location, snippet=value[:100]))
+        findings.append(RequestFinding(kind="pii", detector="ssn", location=location, snippet=redacted_snippet(value), stable_hash=stable_hash(value)))
     for m in _CC_RAW_RE.finditer(value):
         candidate = m.group()
         if _luhn_valid(candidate):
-            findings.append(RequestFinding(kind="pii", detector="credit_card", location=location, snippet=value[:100]))
+            findings.append(RequestFinding(kind="pii", detector="credit_card", location=location, snippet=redacted_snippet(value), stable_hash=stable_hash(value)))
             break
     # Phone: require at least 10 digits to reduce false positives
     for m in _PHONE_RE.finditer(value):
         digits = re.sub(r"\D", "", m.group())
         if len(digits) >= 10:
-            findings.append(RequestFinding(kind="pii", detector="phone", location=location, snippet=value[:100]))
+            findings.append(RequestFinding(kind="pii", detector="phone", location=location, snippet=redacted_snippet(value), stable_hash=stable_hash(value)))
             break
     return findings
 
 
-def _check_ip_for_ssrf(ip: str, hostname: str) -> None:
-    if _is_private_ip(ip):
-        raise SSRFBlockedError(
-            f"SSRF blocked: {hostname!r} resolved to private IP {ip!r}"
-        )
+def _scan_sensitive_value(value: str, location: str) -> list[RequestFinding]:
+    findings: list[RequestFinding] = []
+    findings.extend(_scan_value_for_secrets(value, location))
+    findings.extend(_scan_value_for_pii(value, location))
+    return findings
+
+
+def _check_ip_for_ssrf(ip: str, hostname: str, config: SafeFetchConfig) -> None:
+    try:
+        parsed_ip = ipaddress.ip_address(ip)
+    except ValueError as exc:
+        raise SSRFBlockedError(f"DNS returned invalid address {ip!r} for {hostname!r}") from exc
+    enforce_ip_policy(parsed_ip, hostname, config)
 
 
 def validate_url_scheme(url: str) -> None:
-    parsed = urlparse(url)
-    if parsed.scheme not in _ALLOWED_SCHEMES:
-        raise InvalidSchemeError(
-            f"Scheme {parsed.scheme!r} is not allowed; only http/https are permitted"
-        )
+    canonicalize_url(url, SafeFetchConfig.permissive_research())
 
 
-def check_ssrf(url: str) -> None:
+def check_ssrf(url: str, config: SafeFetchConfig | None = None) -> None:
     """Resolve hostname and block if it points to a private address."""
-    parsed = urlparse(url)
-    host = parsed.hostname
-    if not host:
-        raise SSRFBlockedError(f"Could not parse hostname from URL: {url!r}")
+    if config is None:
+        config = SafeFetchConfig.agent_default()
+    canonical = canonicalize_url(url, config)
+    host = canonical.host
 
     # Direct IP literal in URL
     try:
         addr = ipaddress.ip_address(host)
-        if _is_private_ip(str(addr)):
-            raise SSRFBlockedError(f"SSRF blocked: direct IP {host!r} is private/reserved")
+        enforce_ip_policy(addr, host, config)
         return  # Public IP literal — no DNS needed
     except ValueError:
         pass  # Not an IP literal — resolve via DNS
@@ -203,37 +197,47 @@ def check_ssrf(url: str) -> None:
 
     for result in results:
         ip = result[4][0]
-        _check_ip_for_ssrf(ip, host)
+        _check_ip_for_ssrf(ip, host, config)
 
 
 def scan_request(
     url: str,
     headers: dict[str, str],
     policy: Policy,
+    config: SafeFetchConfig | None = None,
 ) -> list[RequestFinding]:
     """
     Scan URL query params and headers for secrets/PII.
     Returns findings; raises on STRICT if any found (except SSRF which always raises).
     """
-    # Scheme check (always first)
-    validate_url_scheme(url)
+    if config is None:
+        config = SafeFetchConfig(request_policy=policy)
 
     findings: list[RequestFinding] = []
 
-    # Scan query parameters
-    parsed = urlparse(url)
-    params = parse_qs(parsed.query, keep_blank_values=True)
-    for param, values in params.items():
-        for value in values:
-            location = f"query:{param}"
-            findings.extend(_scan_value_for_secrets(value, location))
-            findings.extend(_scan_value_for_pii(value, location))
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        parsed = None
+
+    if parsed is not None:
+        if parsed.username:
+            findings.extend(_scan_sensitive_value(unquote(parsed.username), "url:userinfo"))
+        if parsed.password:
+            findings.extend(_scan_sensitive_value(unquote(parsed.password), "url:userinfo"))
+
+        for index, segment in enumerate(parsed.path.split("/")):
+            if segment:
+                findings.extend(_scan_sensitive_value(unquote(segment), f"path:{index}"))
+
+        for param, value in parse_qsl(parsed.query, keep_blank_values=True):
+            findings.extend(_scan_sensitive_value(unquote(param), f"query-key:{param}"))
+            findings.extend(_scan_sensitive_value(unquote(value), f"query:{param}"))
 
     # Scan header values
     for header_name, header_value in headers.items():
         location = f"header:{header_name}"
-        findings.extend(_scan_value_for_secrets(header_value, location))
-        findings.extend(_scan_value_for_pii(header_value, location))
+        findings.extend(_scan_sensitive_value(header_value, location))
 
     # Apply policy
     if findings and policy == Policy.STRICT:
@@ -253,8 +257,11 @@ def scan_request(
         for f in findings:
             log.warning("safe-fetch request finding: %s at %s", f.detector, f.location)
 
+    # Canonical URL validation happens before any DNS or HTTP work.
+    canonicalize_url(url, config)
+
     # SSRF check may perform DNS resolution, so it runs only after local leak
     # scanning has had a chance to block STRICT-policy secrets/PII pre-network.
-    check_ssrf(url)
+    check_ssrf(url, config)
 
     return findings
