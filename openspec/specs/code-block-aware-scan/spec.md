@@ -1,4 +1,7 @@
-## ADDED Requirements
+## Purpose
+Prevent prompt-injection false positives in technical documentation by excluding code examples from response scan pattern matching.
+
+## Requirements
 
 ### Requirement: Code blocks excluded from injection pattern matching
 The response guard SHALL extract fenced code blocks (` ```...``` `) and inline code spans (`` `...` ``) from the scan copy before running injection pattern matching. Pattern detection runs only on the remaining prose text.

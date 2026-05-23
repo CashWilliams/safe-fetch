@@ -1,4 +1,7 @@
-## ADDED Requirements
+## Purpose
+Remove non-visible or non-rendered HTML content before extraction so hidden prompt-injection payloads are not returned.
+
+## Requirements
 
 ### Requirement: Strip CSS-hidden elements before extraction
 The `sanitize_html()` function SHALL remove any HTML element whose inline `style` attribute renders it invisible to human readers. The following patterns SHALL be detected after normalizing whitespace around `:` and `;` and lowercasing the style value:

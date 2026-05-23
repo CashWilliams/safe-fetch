@@ -15,6 +15,7 @@ from ._exceptions import (
     InvalidSchemeError,
     PIILeakError,
     Policy,
+    RedirectLimitError,
     SSRFBlockedError,
     SafeFetchError,
     SecretLeakError,
@@ -31,6 +32,7 @@ EXIT_PII_LEAK = 5
 EXIT_TIMEOUT = 6
 EXIT_EXTRACTION_FAILED = 7
 EXIT_INJECTION_DETECTED = 8
+EXIT_REDIRECT_LIMIT = 9
 
 _ERROR_CODES: dict[type[SafeFetchError], int] = {
     InvalidSchemeError: EXIT_INVALID_SCHEME,
@@ -40,6 +42,7 @@ _ERROR_CODES: dict[type[SafeFetchError], int] = {
     FetchTimeoutError: EXIT_TIMEOUT,
     ExtractionFailedError: EXIT_EXTRACTION_FAILED,
     InjectionDetectedError: EXIT_INJECTION_DETECTED,
+    RedirectLimitError: EXIT_REDIRECT_LIMIT,
 }
 
 _EPILOG = """\
@@ -72,6 +75,7 @@ Exit Codes:
   6  FetchTimeoutError   — connect or read timeout
   7  ExtractionFailedError or empty content
   8  InjectionDetectedError — injection detected in response
+  9  RedirectLimitError   — too many HTTP redirects
 
 Note: --json field names in SafeFetchResult are stable; adding fields is safe
 but renaming or removing fields is a breaking change.

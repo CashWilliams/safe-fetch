@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpx
 
-from ._exceptions import FetchTimeoutError, SSRFBlockedError
+from ._exceptions import FetchTimeoutError, RedirectLimitError
 from ._extractor import extract
 from ._request_guard import check_ssrf, validate_url_scheme
 from ._types import SafeFetchConfig
@@ -18,7 +18,7 @@ _MAX_REDIRECTS = 5
 _ACCEPT_HEADER = "text/markdown, text/plain;q=0.9, text/html;q=0.8"
 
 
-async def _validate_redirect(url: str) -> None:
+def _validate_redirect(url: str) -> None:
     """Validate a redirect target URL through scheme and SSRF checks."""
     validate_url_scheme(url)
     check_ssrf(url)
@@ -90,12 +90,16 @@ async def fetch(url: str, config: SafeFetchConfig) -> tuple[str, str, str, int]:
 
             if response.is_redirect:
                 if hop >= _MAX_REDIRECTS:
-                    raise FetchTimeoutError(
+                    raise RedirectLimitError(
                         f"Too many redirects (>{_MAX_REDIRECTS}) for {url!r}",
-                        phase="redirect",
+                        redirects=hop + 1,
                     )
-                next_url = str(response.next_request.url) if response.next_request else response.headers.get("location", "")
-                await _validate_redirect(next_url)
+                next_url = (
+                    str(response.next_request.url)
+                    if response.next_request
+                    else urljoin(str(response.url), response.headers.get("location", ""))
+                )
+                _validate_redirect(next_url)
                 current_url = next_url
                 hop += 1
                 continue
@@ -108,26 +112,29 @@ async def fetch(url: str, config: SafeFetchConfig) -> tuple[str, str, str, int]:
             if "text/markdown" in content_type or "text/plain" in content_type:
                 return response.text, final_url, "content-negotiation", status_code
 
-            # HTML path: fire .md probe in background while running extraction
+            # HTML path: fire .md probe while extraction runs in a worker thread.
             html = response.text
             md_url = _build_md_url(current_url)
+            extraction_task = asyncio.create_task(
+                asyncio.to_thread(extract, html, url=final_url, status_code=status_code)
+            )
             probe_task = asyncio.create_task(_try_md_probe(md_url, client)) if md_url else None
 
-            # Run sync extraction while probe I/O is in flight
-            try:
-                content, method = extract(html, url=final_url, status_code=status_code)
-            except Exception as extraction_exc:
-                # Probe may save us — await it before re-raising
-                if probe_task is not None:
-                    probe_result = await probe_task
-                    if probe_result is not None:
-                        return probe_result, final_url, "md-probe", status_code
-                raise extraction_exc
+            if probe_task is None:
+                content, method = await extraction_task
+                return content, final_url, method, status_code
 
-            # Check probe result (may already be done)
-            if probe_task is not None:
-                probe_result = await probe_task
-                if probe_result is not None:
-                    return probe_result, final_url, "md-probe", status_code
+            extraction_result, probe_result = await asyncio.gather(
+                extraction_task,
+                probe_task,
+                return_exceptions=True,
+            )
 
+            if probe_result is not None and not isinstance(probe_result, Exception):
+                return probe_result, final_url, "md-probe", status_code
+
+            if isinstance(extraction_result, Exception):
+                raise extraction_result
+
+            content, method = extraction_result
             return content, final_url, method, status_code

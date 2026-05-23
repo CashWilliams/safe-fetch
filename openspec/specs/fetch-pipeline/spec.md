@@ -1,4 +1,7 @@
-## ADDED Requirements
+## Purpose
+Define the HTTP fetch, markdown negotiation, extraction fallback, timeout, and redirect behavior used by `safe_fetch()`.
+
+## Requirements
 
 ### Requirement: Markdown content negotiation
 The fetch pipeline SHALL attempt to retrieve content as markdown by including `Accept: text/markdown, text/plain;q=0.9, text/html;q=0.8` in the request headers. If the server responds with `Content-Type: text/markdown` or `text/plain`, the response body is used directly without HTML extraction.
@@ -12,7 +15,7 @@ The fetch pipeline SHALL attempt to retrieve content as markdown by including `A
 - **THEN** the pipeline proceeds to the .md probe and HTML extraction steps
 
 ### Requirement: Parallel .md URL probe
-When the primary fetch returns an HTML response, the pipeline SHALL simultaneously request the same URL with `.md` appended to its path. If that probe returns HTTP 200 with `Content-Type: text/markdown` or `text/plain`, the probe content SHALL be used as the result with `extraction_method="md-probe"`. The probe SHALL run concurrently with the primary fetch using `asyncio.gather` so that a probe miss adds no latency. If the original URL already ends in `.md`, the probe SHALL be skipped.
+When the primary fetch returns an HTML response, the pipeline SHALL request the same URL with `.md` appended to its path while HTML extraction runs. If that probe returns HTTP 200 with `Content-Type: text/markdown` or `text/plain`, the probe content SHALL be used as the result with `extraction_method="md-probe"`. The probe SHALL run concurrently with HTML extraction using `asyncio.gather` so that a probe miss adds no extra latency beyond extraction work. If the original URL already ends in `.md`, the probe SHALL be skipped.
 
 #### Scenario: .md probe succeeds and is used
 - **WHEN** `https://example.com/docs/page` is fetched and the server returns HTML, and `https://example.com/docs/page.md` returns HTTP 200 with `Content-Type: text/markdown`
@@ -72,7 +75,7 @@ The fetch pipeline SHALL enforce configurable timeouts with defaults of 10 secon
 - **THEN** a `FetchTimeoutError` is raised with `phase="read"`
 
 ### Requirement: Redirect following with limit
-The fetch pipeline SHALL follow HTTP redirects up to a maximum of 5 hops. Each redirect target SHALL be re-validated by the request guard (SSRF check, scheme check) before following.
+The fetch pipeline SHALL follow HTTP redirects up to a maximum of 5 hops. Each redirect target SHALL be re-validated by the request guard (SSRF check, scheme check) before following. If the redirect limit is exceeded, `RedirectLimitError` SHALL be raised.
 
 #### Scenario: Redirect to private IP is blocked
 - **WHEN** an initial request to a public URL is redirected to a private IP (open redirect attack)
@@ -81,3 +84,7 @@ The fetch pipeline SHALL follow HTTP redirects up to a maximum of 5 hops. Each r
 #### Scenario: Normal redirect chain is followed
 - **WHEN** a URL redirects 1–5 times to public HTTPS URLs
 - **THEN** the final response is returned normally
+
+#### Scenario: Redirect limit exceeded
+- **WHEN** a URL redirects more than 5 times
+- **THEN** `RedirectLimitError` is raised

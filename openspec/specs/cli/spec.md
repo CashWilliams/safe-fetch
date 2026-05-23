@@ -1,4 +1,7 @@
-## ADDED Requirements
+## Purpose
+Define the `safe-fetch` command-line interface, environment-based configuration, output modes, and process exit codes.
+
+## Requirements
 
 ### Requirement: URL positional argument
 The CLI SHALL accept a single positional URL argument and fetch it using `safe_fetch()`. Running with no URL argument SHALL print help and exit 1.
@@ -63,6 +66,7 @@ The CLI SHALL exit with a distinct non-zero code for each `SafeFetchError` subcl
 | 6 | `FetchTimeoutError` |
 | 7 | `ExtractionFailedError` or empty content |
 | 8 | `InjectionDetectedError` |
+| 9 | `RedirectLimitError` |
 
 #### Scenario: SSRF block exits with code 3
 - **WHEN** `safe-fetch http://192.168.1.1/` is run
@@ -80,6 +84,10 @@ The CLI SHALL exit with a distinct non-zero code for each `SafeFetchError` subcl
 - **WHEN** `SAFE_FETCH_RESPONSE_POLICY=strict` is set and fetched content triggers injection detection
 - **THEN** the process exits 8
 
+#### Scenario: Redirect limit exits with code 9
+- **WHEN** a fetched URL redirects more than 5 times
+- **THEN** the process exits 9
+
 ### Requirement: Verbose --help
 The CLI `--help` SHALL include: a one-line description, `--json` flag description, all env var names with their defaults, at least three usage examples, and the full exit code table.
 
@@ -89,7 +97,7 @@ The CLI `--help` SHALL include: a one-line description, `--json` flag descriptio
 
 #### Scenario: --help includes exit code table
 - **WHEN** `safe-fetch --help` is run
-- **THEN** stdout includes a table mapping exit codes 0–8 to their meanings
+- **THEN** stdout includes a table mapping exit codes 0–9 to their meanings
 
 #### Scenario: --help includes usage examples
 - **WHEN** `safe-fetch --help` is run

@@ -1,4 +1,7 @@
-## ADDED Requirements
+## Purpose
+Normalize response scan text to catch Unicode-obfuscated injection phrases without changing returned content.
+
+## Requirements
 
 ### Requirement: NFKC normalization before injection scanning
 The response guard SHALL apply Unicode NFKC normalization to a copy of the fetched content before running pattern matching. The normalized copy is used only for scanning; the original (invisible-char-stripped) content is returned to the caller.

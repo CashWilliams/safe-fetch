@@ -8,7 +8,8 @@ Secure async web fetching for AI agents. Combines pre-request secret/PII scannin
 from safe_fetch import safe_fetch, SafeFetchConfig, Policy
 
 result = await safe_fetch("https://example.com/article")
-print(result.content)          # clean markdown
+print(result.content)          # wrapped, LLM-ready markdown
+print(result.raw_content)      # unwrapped markdown
 print(result.extraction_method)  # how it was obtained
 print(result.response_findings)  # injection findings (empty if clean)
 ```
@@ -28,7 +29,7 @@ Both `request_policy` and `response_policy` accept a `Policy` enum value.
 
 | Policy | Request behavior | Response behavior |
 |---|---|---|
-| `STRICT` | Raise `SecretLeakError` / `PIILeakError` on any finding | Raise `InjectionDetectedError` on HIGH-confidence finding |
+| `STRICT` | Raise `SecretLeakError` / `PIILeakError` on any finding | Raise `InjectionDetectedError` on any finding |
 | `WARN` | Log finding, record in `request_findings`, continue | Log finding, redact matched content, record in `response_findings` |
 | `PERMISSIVE` | Record in `request_findings`, continue | Record in `response_findings`, return content unmodified |
 
@@ -55,7 +56,7 @@ class SafeFetchConfig:
 Content is retrieved in this order, returning at the first success:
 
 1. **Content negotiation** — `Accept: text/markdown` header; if server returns markdown/plain text, used directly (`extraction_method="content-negotiation"`)
-2. **llms.txt** — checks `<scheme>://<host>/llms.txt`; if found, returns curated LLM content (`extraction_method="llms-txt"`)
+2. **.md probe** — for HTML responses, probes the same path with `.md` appended while extraction runs (`extraction_method="md-probe"`)
 3. **trafilatura** — extracts main content from HTML as markdown (`extraction_method="trafilatura"`)
 4. **readability + markdownify** — fallback HTML extraction (`extraction_method="readability+markdownify"`)
 
@@ -70,8 +71,9 @@ All exceptions inherit from `SafeFetchError`.
 | `SecretLeakError` | Secret detected in URL query params or headers (`STRICT`) |
 | `PIILeakError` | PII (email, phone, credit card, SSN) detected in URL or headers (`STRICT`) |
 | `FetchTimeoutError` | Connect or read timeout (`.phase` = `"connect"` or `"read"`) |
+| `RedirectLimitError` | More than 5 HTTP redirects |
 | `ExtractionFailedError` | All extraction methods failed |
-| `InjectionDetectedError` | HIGH-confidence injection pattern in response (`STRICT`) |
+| `InjectionDetectedError` | Injection finding in response (`STRICT`) |
 
 ```python
 from safe_fetch import SafeFetchError
@@ -84,7 +86,7 @@ except SafeFetchError as e:
 
 ## Optional LLM Escalation
 
-For borderline injection cases (MEDIUM heuristic confidence), provide an `llm_client` that implements `classify_injection(text: str) -> bool`. This is called at most once per fetch and only when structural heuristics score above threshold.
+For borderline injection cases (MEDIUM heuristic confidence), provide an `llm_client` that implements `classify_injection(text: str) -> bool` or an async equivalent. This is called at most once per fetch and only under `STRICT` or `WARN` when structural heuristics score above threshold.
 
 ```python
 class MyLLMClient:

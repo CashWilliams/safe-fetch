@@ -1,4 +1,7 @@
-## ADDED Requirements
+## Purpose
+Detect and handle prompt-injection content in fetched responses while preserving clean content for callers.
+
+## Requirements
 
 ### Requirement: Invisible and zero-width character stripping
 The response guard SHALL strip all invisible and zero-width Unicode characters from fetched content before returning it. This includes zero-width space (U+200B), zero-width non-joiner (U+200C), zero-width joiner (U+200D), word joiner (U+2060), soft hyphen (U+00AD), and similar characters that can be used to hide injected content from human review.
@@ -76,7 +79,7 @@ When the combined score exceeds a configurable threshold (default: 0.7), a `MEDI
 - **THEN** structural score remains below threshold and no finding is produced (normal imperative content in expected contexts is not adversarial)
 
 ### Requirement: Optional LLM escalation for ambiguous content
-When a caller provides an `llm_client` implementing the escalation interface and `response_policy` is `STRICT` or `WARN`, the response guard MAY make a single classification API call for content that produces `MEDIUM` confidence structural findings.
+The response guard SHALL support optional LLM escalation for ambiguous content. When a caller provides an `llm_client` implementing the escalation interface and `response_policy` is `STRICT` or `WARN`, the response guard MAY make a single classification API call for content that produces `MEDIUM` confidence structural findings.
 
 #### Scenario: LLM escalation upgrades medium finding on adversarial content
 - **WHEN** structural heuristics produce a `MEDIUM` finding AND an `llm_client` is provided

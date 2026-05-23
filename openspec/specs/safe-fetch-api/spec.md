@@ -1,4 +1,7 @@
-## ADDED Requirements
+## Purpose
+Define the public Python API, configuration, result shape, policies, and exception hierarchy for safe-fetch.
+
+## Requirements
 
 ### Requirement: Single async entry point
 The package SHALL expose a single public async function `safe_fetch(url, ...)` that composes request guard, fetch pipeline, and response guard in order. Callers SHALL NOT need to import or instantiate internal modules.
@@ -36,7 +39,7 @@ The `safe_fetch` function SHALL return a `SafeFetchResult` dataclass with fields
 - `content_marker: str` — the 32-character hex nonce embedded in both boundary tags
 - `url: str` — final URL after redirects
 - `status_code: int` — HTTP status of the final response
-- `extraction_method: str` — one of: `"content-negotiation"`, `"llms-txt"`, `"trafilatura"`, `"readability+markdownify"`
+- `extraction_method: str` — one of: `"content-negotiation"`, `"md-probe"`, `"trafilatura"`, `"readability+markdownify"`
 - `request_findings: list[RequestFinding]` — secret/PII findings from pre-request scan (empty if none)
 - `response_findings: list[InjectionFinding]` — injection findings from response scan (empty if none)
 
@@ -73,6 +76,7 @@ The package SHALL define a clear exception hierarchy rooted at `SafeFetchError`:
   - `InjectionDetectedError` — injection detected in response under STRICT policy
   - `ExtractionFailedError` — all extraction methods failed
   - `FetchTimeoutError` — connect or read timeout
+  - `RedirectLimitError` — HTTP redirect limit exceeded
 
 #### Scenario: All errors are catchable as SafeFetchError
 - **WHEN** any error condition occurs

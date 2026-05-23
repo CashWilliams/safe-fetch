@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from safe_fetch._exceptions import FetchTimeoutError
+from safe_fetch._exceptions import FetchTimeoutError, RedirectLimitError, SSRFBlockedError
 from safe_fetch._fetch_pipeline import _build_md_url, fetch
 from safe_fetch._types import SafeFetchConfig
 
@@ -75,6 +75,71 @@ class TestTimeouts:
             with pytest.raises(FetchTimeoutError) as exc_info:
                 await fetch("https://example.com/", config)
             assert exc_info.value.phase == "read"
+
+
+# ---------------------------------------------------------------------------
+# Redirect handling
+# ---------------------------------------------------------------------------
+
+class TestRedirects:
+    async def test_normal_redirect_chain_followed(self, config):
+        first = httpx.Response(
+            302,
+            headers={"location": "/step-1"},
+            request=httpx.Request("GET", "https://example.com/start"),
+        )
+        second = httpx.Response(
+            302,
+            headers={"location": "https://example.com/final"},
+            request=httpx.Request("GET", "https://example.com/step-1"),
+        )
+        final = _make_response(
+            "text/markdown",
+            "# Final",
+            url="https://example.com/final",
+        )
+        responses = [first, second, final]
+
+        async def mock_get(url, **kwargs):
+            return responses.pop(0)
+
+        with (
+            patch("httpx.AsyncClient.get", new_callable=AsyncMock, side_effect=mock_get),
+            patch("safe_fetch._fetch_pipeline.check_ssrf"),
+        ):
+            content, final_url, method, status = await fetch("https://example.com/start", config)
+
+        assert content == "# Final"
+        assert final_url == "https://example.com/final"
+        assert method == "content-negotiation"
+
+    async def test_redirect_to_private_ip_blocked(self, config):
+        redirect = httpx.Response(
+            302,
+            headers={"location": "http://192.168.1.1/admin"},
+            request=httpx.Request("GET", "https://example.com/start"),
+        )
+
+        with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=redirect):
+            with pytest.raises(SSRFBlockedError):
+                await fetch("https://example.com/start", config)
+
+    async def test_redirect_limit_raises_redirect_limit_error(self, config):
+        async def mock_get(url, **kwargs):
+            return httpx.Response(
+                302,
+                headers={"location": f"{url}/next"},
+                request=httpx.Request("GET", url),
+            )
+
+        with (
+            patch("httpx.AsyncClient.get", new_callable=AsyncMock, side_effect=mock_get),
+            patch("safe_fetch._fetch_pipeline.check_ssrf"),
+        ):
+            with pytest.raises(RedirectLimitError) as exc_info:
+                await fetch("https://example.com/start", config)
+
+        assert exc_info.value.redirects == 6
 
 
 # ---------------------------------------------------------------------------

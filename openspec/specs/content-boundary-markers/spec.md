@@ -1,4 +1,7 @@
-## ADDED Requirements
+## Purpose
+Define nonce-backed content boundary markers that distinguish untrusted fetched content from surrounding agent instructions.
+
+## Requirements
 
 ### Requirement: Per-fetch nonce generation
 `safe_fetch()` SHALL generate a cryptographically random nonce for every successful fetch using `secrets.token_hex(16)` (128 bits of entropy, 32 hex characters). The nonce SHALL be unique per fetch invocation and SHALL NOT be reused across calls.

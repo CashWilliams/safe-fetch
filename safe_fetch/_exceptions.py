@@ -61,3 +61,11 @@ class FetchTimeoutError(SafeFetchError):
     def __init__(self, message: str, phase: str = "") -> None:
         super().__init__(message)
         self.phase = phase
+
+
+class RedirectLimitError(SafeFetchError):
+    """HTTP redirect limit exceeded."""
+
+    def __init__(self, message: str, redirects: int = 0) -> None:
+        super().__init__(message)
+        self.redirects = redirects

@@ -1,4 +1,7 @@
-## ADDED Requirements
+## Purpose
+Protect outbound requests from leaking secrets or PII and block SSRF-prone URL targets before network access.
+
+## Requirements
 
 ### Requirement: Secret detection in URLs
 The request guard SHALL scan URL query parameter values for high-entropy strings and known secret patterns before any network request is made. Detection uses `detect-secrets` detectors including `AWSKeyDetector`, `GitHubTokenDetector`, `KeywordDetector`, and `HexHighEntropyString`/`Base64HighEntropyString` entropy scanners.

@@ -14,6 +14,7 @@ from safe_fetch._exceptions import (
     InjectionDetectedError,
     InvalidSchemeError,
     Policy,
+    RedirectLimitError,
     SSRFBlockedError,
 )
 from safe_fetch._types import InjectionFinding, RequestFinding, SafeFetchConfig, SafeFetchResult
@@ -102,10 +103,11 @@ def _make_result(**kwargs):
 def test_json_success_output(monkeypatch, capsys):
     result = _make_result()
 
-    async def mock_safe_fetch(url, config):
+    def run_success(coro):
+        coro.close()
         return result
 
-    monkeypatch.setattr("safe_fetch._cli.asyncio.run", lambda coro: result)
+    monkeypatch.setattr("safe_fetch._cli.asyncio.run", run_success)
     monkeypatch.setattr(
         "sys.argv", ["safe-fetch", "--json", "https://example.com"]
     )
@@ -130,6 +132,7 @@ def test_json_success_output(monkeypatch, capsys):
 
 def test_json_ssrf_error(monkeypatch, capsys):
     def raise_ssrf(coro):
+        coro.close()
         raise SSRFBlockedError("Private IP blocked")
 
     monkeypatch.setattr("safe_fetch._cli.asyncio.run", raise_ssrf)
@@ -152,6 +155,7 @@ def test_json_ssrf_error(monkeypatch, capsys):
 
 def test_exit_code_invalid_scheme(monkeypatch, capsys):
     def raise_invalid(coro):
+        coro.close()
         raise InvalidSchemeError("file:// not allowed")
 
     monkeypatch.setattr("safe_fetch._cli.asyncio.run", raise_invalid)
@@ -170,6 +174,7 @@ def test_exit_code_invalid_scheme(monkeypatch, capsys):
 
 def test_exit_code_ssrf(monkeypatch, capsys):
     def raise_ssrf(coro):
+        coro.close()
         raise SSRFBlockedError("Private IP blocked")
 
     monkeypatch.setattr("safe_fetch._cli.asyncio.run", raise_ssrf)
@@ -182,13 +187,33 @@ def test_exit_code_ssrf(monkeypatch, capsys):
     assert exc_info.value.code == 3
 
 
+def test_exit_code_redirect_limit(monkeypatch, capsys):
+    def raise_redirect_limit(coro):
+        coro.close()
+        raise RedirectLimitError("Too many redirects", redirects=6)
+
+    monkeypatch.setattr("safe_fetch._cli.asyncio.run", raise_redirect_limit)
+    monkeypatch.setattr("sys.argv", ["safe-fetch", "https://example.com/loop"])
+    monkeypatch.setattr("safe_fetch._cli._load_config", lambda: SafeFetchConfig())
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 9
+
+
 # ---------------------------------------------------------------------------
 # 6.7 Test empty content exits 7
 # ---------------------------------------------------------------------------
 
 def test_empty_content_exits_7(monkeypatch, capsys):
     result = _make_result(content="", raw_content="", content_marker="abc123")
-    monkeypatch.setattr("safe_fetch._cli.asyncio.run", lambda coro: result)
+
+    def run_success(coro):
+        coro.close()
+        return result
+
+    monkeypatch.setattr("safe_fetch._cli.asyncio.run", run_success)
     monkeypatch.setattr("sys.argv", ["safe-fetch", "https://example.com"])
     monkeypatch.setattr("safe_fetch._cli._load_config", lambda: SafeFetchConfig())
 

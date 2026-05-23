@@ -174,3 +174,29 @@ class TestPolicyWiring:
                     {"Authorization": "Bearer ghp_" + "a" * 36},
                     Policy.STRICT,
                 )
+
+    def test_strict_secret_blocks_before_ssrf_resolution(self):
+        from unittest.mock import patch
+
+        with patch("safe_fetch._request_guard.check_ssrf") as check_ssrf_mock:
+            with pytest.raises(SecretLeakError):
+                scan_request(
+                    "https://does-not-need-dns.invalid/?api_key=AKIAIOSFODNN7EXAMPLE",
+                    {},
+                    Policy.STRICT,
+                )
+
+        check_ssrf_mock.assert_not_called()
+
+    def test_warn_findings_still_run_ssrf_resolution(self):
+        from unittest.mock import patch
+
+        with patch("safe_fetch._request_guard.check_ssrf") as check_ssrf_mock:
+            findings = scan_request(
+                "https://example.com/?email=user@example.com",
+                {},
+                Policy.WARN,
+            )
+
+        assert findings
+        check_ssrf_mock.assert_called_once()

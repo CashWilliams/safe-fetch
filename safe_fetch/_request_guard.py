@@ -218,9 +218,6 @@ def scan_request(
     # Scheme check (always first)
     validate_url_scheme(url)
 
-    # SSRF check (always enforced regardless of policy)
-    check_ssrf(url)
-
     findings: list[RequestFinding] = []
 
     # Scan query parameters
@@ -255,5 +252,9 @@ def scan_request(
     elif findings and policy == Policy.WARN:
         for f in findings:
             log.warning("safe-fetch request finding: %s at %s", f.detector, f.location)
+
+    # SSRF check may perform DNS resolution, so it runs only after local leak
+    # scanning has had a chance to block STRICT-policy secrets/PII pre-network.
+    check_ssrf(url)
 
     return findings

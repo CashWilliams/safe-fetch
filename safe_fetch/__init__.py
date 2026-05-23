@@ -8,6 +8,7 @@ from ._exceptions import (
     InvalidSchemeError,
     PIILeakError,
     Policy,
+    RedirectLimitError,
     SSRFBlockedError,
     SafeFetchError,
     SecretLeakError,
@@ -32,6 +33,7 @@ __all__ = [
     "InjectionDetectedError",
     "ExtractionFailedError",
     "FetchTimeoutError",
+    "RedirectLimitError",
     "RequestFinding",
     "InjectionFinding",
 ]
@@ -46,7 +48,7 @@ async def safe_fetch(
 
     Composes:
       1. Request guard — scheme validation, SSRF blocking, secret/PII scanning
-      2. Fetch pipeline — content negotiation, llms.txt, trafilatura, fallback
+      2. Fetch pipeline — content negotiation, .md probe, trafilatura, fallback
       3. Response guard — invisible char stripping, injection detection
 
     Args:
@@ -65,6 +67,7 @@ async def safe_fetch(
         FetchTimeoutError: Connect or read timeout.
         ExtractionFailedError: All content extraction methods failed.
         InjectionDetectedError: Injection detected in response (STRICT policy).
+        RedirectLimitError: Redirect limit exceeded.
     """
     from datetime import datetime, timezone
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+from inspect import isawaitable
 from typing import Any
 
 from ._exceptions import InjectionDetectedError, Policy
@@ -238,7 +239,8 @@ def _heuristic_scan(text: str) -> list[InjectionFinding]:
 async def _escalate_with_llm(finding: InjectionFinding, text: str, llm_client: Any) -> InjectionFinding:
     """Call llm_client.classify_injection(text) and upgrade finding if adversarial."""
     try:
-        is_adversarial = await llm_client.classify_injection(text)
+        result = llm_client.classify_injection(text)
+        is_adversarial = await result if isawaitable(result) else result
         if is_adversarial:
             return InjectionFinding(
                 confidence="HIGH",
@@ -282,7 +284,12 @@ async def scan_response(
 
     # LLM escalation for MEDIUM findings (only if no HIGH already and client provided)
     upgraded_heuristic: list[InjectionFinding] = []
-    if llm_client is not None and heuristic_findings and not pattern_findings:
+    if (
+        policy in (Policy.STRICT, Policy.WARN)
+        and llm_client is not None
+        and heuristic_findings
+        and not pattern_findings
+    ):
         for f in heuristic_findings:
             upgraded = await _escalate_with_llm(f, cleaned, llm_client)
             upgraded_heuristic.append(upgraded)
@@ -295,9 +302,9 @@ async def scan_response(
     if not all_findings:
         return cleaned, []
 
-    if policy == Policy.STRICT and high_findings:
+    if policy == Policy.STRICT:
         raise InjectionDetectedError(
-            f"Injection detected in response ({high_findings[0].pattern_matched or high_findings[0].heuristic})",
+            f"Injection detected in response ({all_findings[0].pattern_matched or all_findings[0].heuristic})",
             findings=all_findings,
         )
 
