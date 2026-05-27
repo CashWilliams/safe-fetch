@@ -95,9 +95,29 @@ class TestPIIDetection:
         findings = _scan_value_for_pii("4111111111111111", "query:cc")
         assert any(f.detector == "credit_card" for f in findings)
 
+    def test_formatted_credit_card_detected_without_card_context(self):
+        findings = _scan_value_for_pii("4111-1111-1111-1111", "query:value")
+        assert any(f.detector == "credit_card" for f in findings)
+
+    def test_numeric_path_identifier_not_detected_as_credit_card(self):
+        findings = _scan_value_for_pii("2058901984137371952", "path:3")
+        assert not any(f.detector == "credit_card" for f in findings)
+
     def test_phone_detected(self):
         findings = _scan_value_for_pii("+1-800-555-1234", "query:phone")
         assert any(f.detector == "phone" for f in findings)
+
+    def test_unformatted_phone_detected_with_phone_context(self):
+        findings = _scan_value_for_pii("18005551234", "query:phone")
+        assert any(f.detector == "phone" for f in findings)
+
+    def test_numeric_path_identifier_not_detected_as_phone(self):
+        findings = _scan_value_for_pii("2059119768662065523", "path:3")
+        assert not any(f.detector == "phone" for f in findings)
+
+    def test_unformatted_path_digits_not_detected_as_phone(self):
+        findings = _scan_value_for_pii("18005551234", "path:2")
+        assert not any(f.detector == "phone" for f in findings)
 
     def test_clean_value_no_pii(self):
         findings = _scan_value_for_pii("hello-world", "query:q")
@@ -165,6 +185,30 @@ class TestPolicyWiring:
         with patch("safe_fetch._request_guard.check_ssrf"):
             findings = scan_request("https://example.com/page", {}, Policy.STRICT)
         assert findings == []
+
+    def test_status_url_numeric_id_does_not_trigger_phone_pii(self):
+        from unittest.mock import patch
+
+        with patch("safe_fetch._request_guard.check_ssrf"):
+            findings = scan_request(
+                "https://x.com/i/status/2059119768662065523",
+                {},
+                Policy.STRICT,
+            )
+
+        assert not any(f.detector == "phone" for f in findings)
+
+    def test_status_url_luhn_numeric_id_does_not_trigger_credit_card_pii(self):
+        from unittest.mock import patch
+
+        with patch("safe_fetch._request_guard.check_ssrf"):
+            findings = scan_request(
+                "https://x.com/i/status/2058901984137371952",
+                {},
+                Policy.STRICT,
+            )
+
+        assert not any(f.detector == "credit_card" for f in findings)
 
     def test_header_secret_detected(self):
         from unittest.mock import patch

@@ -1,8 +1,11 @@
 """HTML content extraction: trafilatura primary, readability+markdownify fallback."""
 from __future__ import annotations
 
+import html as html_lib
+import json
 import re
 from contextlib import suppress
+from urllib.parse import urlparse
 
 from ._exceptions import ExtractionFailedError
 from ._types import SafetyEvent
@@ -143,6 +146,10 @@ def extract(
     Returns (content, extraction_method).
     Raises ExtractionFailedError if all extractors fail.
     """
+    result = _try_x_status_initial_state(html, url)
+    if result is not None:
+        return result, "x-initial-state"
+
     html = sanitize_html(html, safety_events=safety_events)
 
     # Primary: trafilatura
@@ -236,3 +243,110 @@ def _try_readability_markdownify(html: str) -> str | None:
         return md.strip() or None
     except Exception:
         return None
+
+
+def _try_x_status_initial_state(html: str, url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if host.lower().removeprefix("www.") not in {"x.com", "twitter.com"}:
+        return None
+    status_id = _status_id_from_path(parsed.path)
+    if status_id is None:
+        return None
+
+    state = _extract_json_assignment(html, "window.__INITIAL_STATE__")
+    if not isinstance(state, dict):
+        return None
+
+    tweet = (
+        state.get("entities", {})
+        .get("tweets", {})
+        .get("entities", {})
+        .get(status_id)
+    )
+    if not isinstance(tweet, dict):
+        return None
+
+    text = str(tweet.get("full_text") or tweet.get("text") or "").strip()
+    if not text:
+        return None
+    text = _expand_tweet_urls(html_lib.unescape(text), tweet)
+
+    user_id = tweet.get("user")
+    user = {}
+    if user_id is not None:
+        maybe_user = (
+            state.get("entities", {})
+            .get("users", {})
+            .get("entities", {})
+            .get(str(user_id), {})
+        )
+        if isinstance(maybe_user, dict):
+            user = maybe_user
+
+    author = html_lib.unescape(str(user.get("name") or "").strip())
+    screen_name = html_lib.unescape(str(user.get("screen_name") or "").strip())
+    title = "Tweet"
+    if author and screen_name:
+        title = f"Tweet by {author} (@{screen_name})"
+    elif author:
+        title = f"Tweet by {author}"
+    elif screen_name:
+        title = f"Tweet by @{screen_name}"
+
+    lines = [f"# {title}", "", text]
+    created_at = tweet.get("created_at")
+    if created_at:
+        lines.extend(["", f"Posted: {created_at}"])
+
+    metrics = []
+    for key, label in (
+        ("favorite_count", "likes"),
+        ("retweet_count", "reposts"),
+        ("reply_count", "replies"),
+        ("quote_count", "quotes"),
+        ("bookmark_count", "bookmarks"),
+    ):
+        value = tweet.get(key)
+        if isinstance(value, int):
+            metrics.append(f"{value} {label}")
+    if metrics:
+        lines.extend(["", "Metrics: " + ", ".join(metrics)])
+
+    return "\n".join(lines).strip()
+
+
+def _status_id_from_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) >= 2 and parts[-2] == "status" and parts[-1].isdigit():
+        return parts[-1]
+    return None
+
+
+def _extract_json_assignment(source: str, assignment: str) -> object | None:
+    index = source.find(assignment)
+    if index < 0:
+        return None
+    equals_index = source.find("=", index + len(assignment))
+    if equals_index < 0:
+        return None
+    payload = source[equals_index + 1 :].lstrip()
+    try:
+        value, _ = json.JSONDecoder().raw_decode(payload)
+    except json.JSONDecodeError:
+        return None
+    return value
+
+
+def _expand_tweet_urls(text: str, tweet: dict) -> str:
+    urls = tweet.get("entities", {}).get("urls", [])
+    if not isinstance(urls, list):
+        return text
+    for item in urls:
+        if not isinstance(item, dict):
+            continue
+        short_url = item.get("url")
+        expanded_url = item.get("expanded_url") or item.get("display_url")
+        if isinstance(short_url, str) and isinstance(expanded_url, str):
+            text = text.replace(short_url, html_lib.unescape(expanded_url))
+    return text

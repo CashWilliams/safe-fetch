@@ -29,6 +29,8 @@ _PHONE_RE = re.compile(
 _SSN_RE = re.compile(r"\b(?!000|666|9\d{2})\d{3}[-]?(?!00)\d{2}[-]?(?!0000)\d{4}\b")
 # Credit card: 13-19 digits, optionally space/dash separated
 _CC_RAW_RE = re.compile(r"\b[\d][\d\s\-]{11,17}[\d]\b")
+_CC_LOCATION_HINTS = ("cc", "card", "credit", "payment", "pan")
+_PHONE_LOCATION_HINTS = ("phone", "tel", "mobile", "cell", "contact")
 
 
 def _is_private_ip(addr: str) -> bool:
@@ -143,13 +145,22 @@ def _scan_value_for_pii(value: str, location: str) -> list[RequestFinding]:
         findings.append(RequestFinding(kind="pii", detector="ssn", location=location, snippet=redacted_snippet(value), stable_hash=stable_hash(value)))
     for m in _CC_RAW_RE.finditer(value):
         candidate = m.group()
-        if _luhn_valid(candidate):
+        formatted = bool(re.search(r"[\s\-]", candidate))
+        card_labeled = any(hint in location.lower() for hint in _CC_LOCATION_HINTS)
+        if _luhn_valid(candidate) and (formatted or card_labeled):
             findings.append(RequestFinding(kind="pii", detector="credit_card", location=location, snippet=redacted_snippet(value), stable_hash=stable_hash(value)))
             break
-    # Phone: require at least 10 digits to reduce false positives
+    # Phone: require at least 10 digits, avoid matching substrings of opaque
+    # numeric identifiers, and require context for unformatted digit strings.
     for m in _PHONE_RE.finditer(value):
+        previous_char = value[m.start() - 1] if m.start() > 0 else ""
+        next_char = value[m.end()] if m.end() < len(value) else ""
+        if previous_char.isdigit() or next_char.isdigit():
+            continue
         digits = re.sub(r"\D", "", m.group())
-        if len(digits) >= 10:
+        formatted = bool(re.search(r"[+\-.\s()]", m.group()))
+        phone_labeled = any(hint in location.lower() for hint in _PHONE_LOCATION_HINTS)
+        if 10 <= len(digits) <= 15 and (formatted or phone_labeled):
             findings.append(RequestFinding(kind="pii", detector="phone", location=location, snippet=redacted_snippet(value), stable_hash=stable_hash(value)))
             break
     return findings

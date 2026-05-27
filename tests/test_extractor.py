@@ -45,6 +45,39 @@ class TestExtractorCascade:
         assert content is not None
         assert len(content) > 0
 
+    def test_x_status_initial_state_fallback(self):
+        html = """
+        <html><body><script>
+        window.__INITIAL_STATE__={
+          "entities":{
+            "tweets":{"entities":{
+              "2059119768662065523":{
+                "full_text":"https://t.co/abc",
+                "entities":{"urls":[{"url":"https://t.co/abc","expanded_url":"https://x.com/i/article/2059105486956380161"}]},
+                "user":"1998221941300490241",
+                "created_at":"2026-05-26T03:49:44.000Z",
+                "favorite_count":215,
+                "retweet_count":21,
+                "reply_count":13,
+                "quote_count":2,
+                "bookmark_count":515
+              }
+            }},
+            "users":{"entities":{
+              "1998221941300490241":{"name":"Tony Simons","screen_name":"tonysimons_"}
+            }}
+          }
+        };window.__META_DATA__={};
+        </script></body></html>
+        """
+
+        content, method = extract(html, url="https://x.com/i/status/2059119768662065523")
+
+        assert method == "x-initial-state"
+        assert "# Tweet by Tony Simons (@tonysimons_)" in content
+        assert "https://x.com/i/article/2059105486956380161" in content
+        assert "Metrics: 215 likes, 21 reposts, 13 replies, 2 quotes, 515 bookmarks" in content
+
     def test_empty_html_raises_extraction_failed(self):
         with pytest.raises(ExtractionFailedError):
             extract("", url="https://example.com/empty", status_code=200)
